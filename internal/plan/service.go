@@ -167,6 +167,125 @@ func (s *Service) Complete(
 	return plan, err
 }
 
+// Abort moves an active plan into the terminal aborted state inside a single
+// store transaction: every still-claimed lease of the plan is revoked and its
+// node returned to ready, while reported leases, stored probes, and
+// assessments are preserved. The abort fact is recorded once per plan, so a
+// repeated abort returns the identical record instead of a new transition.
+func (s *Service) Abort(
+	ctx context.Context,
+	planID string,
+	input domain.AbortInput,
+) (domain.PlanAbort, error) {
+	if err := domain.ValidateAbortInput(input); err != nil {
+		return domain.PlanAbort{}, err
+	}
+	input = domain.NormalizeAbortInput(input)
+	now := s.clock.Now().UTC()
+	var record domain.PlanAbort
+	err := s.store.Write(ctx, func(state *domain.State) error {
+		plan, ok := state.Plans[planID]
+		if !ok {
+			return domain.NotFound("plan", planID)
+		}
+		if plan.State == domain.PlanAborted {
+			existing, found := state.AbortRecords[plan.AbortID]
+			if !found {
+				return domain.NewError(domain.CodeStorageFailure, "plan references a missing abort record", map[string]any{
+					"abort_id": plan.AbortID,
+				})
+			}
+			record = existing
+			return nil
+		}
+		if input.ExpectedVersion > 0 && plan.Version != input.ExpectedVersion {
+			return versionConflict(planID, input.ExpectedVersion, plan.Version)
+		}
+		if err := domain.AbortPlan(&plan, now); err != nil {
+			return err
+		}
+
+		revoked := make([]string, 0)
+		for leaseID, lease := range state.Leases {
+			if lease.PlanID == planID && lease.State == domain.LeaseClaimed {
+				revoked = append(revoked, leaseID)
+			}
+		}
+		sort.Strings(revoked)
+		for _, leaseID := range revoked {
+			lease := state.Leases[leaseID]
+			finishedAt := now
+			lease.State = domain.LeaseRevoked
+			lease.FinishedAt = &finishedAt
+			state.Leases[leaseID] = lease
+			if node, ok := state.Nodes[lease.NodeID]; ok && node.State == domain.NodeLeased {
+				node.State = domain.NodeReady
+				node.Version++
+				node.UpdatedAt = now
+				state.Nodes[node.ID] = node
+			}
+		}
+		preservedProbes := 0
+		for _, probe := range state.Probes {
+			if probe.PlanID == planID {
+				preservedProbes++
+			}
+		}
+
+		record = domain.PlanAbort{
+			ID:                  s.ids.New("abt"),
+			PlanID:              planID,
+			Reason:              input.Reason,
+			Initiator:           input.Initiator,
+			RequestKey:          input.RequestKey,
+			RevokedLeaseIDs:     revoked,
+			PreservedProbeCount: preservedProbes,
+			AbortedAt:           now,
+		}
+		state.AbortRecords[record.ID] = record
+		plan.AbortID = record.ID
+		state.Plans[planID] = plan
+		for _, leaseID := range revoked {
+			store.AddAudit(state, s.ids, "lease", leaseID, "revoked", now, map[string]any{
+				"plan_id":  planID,
+				"abort_id": record.ID,
+			})
+		}
+		store.AddAudit(state, s.ids, "plan", planID, "aborted", now, map[string]any{
+			"abort_id":              record.ID,
+			"reason":                record.Reason,
+			"initiator":             record.Initiator,
+			"revoked_lease_count":   len(revoked),
+			"preserved_probe_count": preservedProbes,
+			"version":               plan.Version,
+		})
+		return nil
+	})
+	return record, err
+}
+
+func (s *Service) GetAbort(ctx context.Context, planID string) (domain.PlanAbort, error) {
+	var record domain.PlanAbort
+	err := s.store.Read(ctx, func(state *domain.State) error {
+		plan, ok := state.Plans[planID]
+		if !ok {
+			return domain.NotFound("plan", planID)
+		}
+		if plan.State != domain.PlanAborted || plan.AbortID == "" {
+			return domain.NotFound("abort", planID)
+		}
+		found, ok := state.AbortRecords[plan.AbortID]
+		if !ok {
+			return domain.NewError(domain.CodeStorageFailure, "plan references a missing abort record", map[string]any{
+				"abort_id": plan.AbortID,
+			})
+		}
+		record = found
+		return nil
+	})
+	return record, err
+}
+
 func (s *Service) Get(ctx context.Context, planID string) (domain.RolloutPlan, error) {
 	var plan domain.RolloutPlan
 	err := s.store.Read(ctx, func(state *domain.State) error {

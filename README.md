@@ -135,6 +135,18 @@ curl -sS -X PATCH http://127.0.0.1:8090/v1/plans/<plan_id>/assessments \
   -d '{"request_key": "assess-request-0001"}'
 ```
 
+中止计划（撤销未完成租约并记录中止事实）：
+
+```bash
+curl -sS -X PATCH http://127.0.0.1:8090/v1/plans/<plan_id>/abort \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "reason": "authority serving stale serial",
+    "initiator": "ops-oncall",
+    "request_key": "abort-request-0001"
+  }'
+```
+
 ## API 概览
 
 成功响应：
@@ -173,6 +185,8 @@ curl -sS -X PATCH http://127.0.0.1:8090/v1/plans/<plan_id>/assessments \
 | `PATCH` | `/v1/plans/{id}/revisions` | 添加区域版本 |
 | `PATCH` | `/v1/plans/{id}/activate` | 激活计划 |
 | `PATCH` | `/v1/plans/{id}/complete` | 完成计划 |
+| `PATCH` | `/v1/plans/{id}/abort` | 中止计划并撤销未完成租约 |
+| `GET` | `/v1/plans/{id}/abort` | 查询计划的中止事实 |
 | `PATCH` | `/v1/plans/{id}/leases` | 给节点分配租约 |
 | `PATCH` | `/v1/leases/{id}/release` | 提前释放租约 |
 | `PATCH` | `/v1/leases/{id}/probes` | 登记探针并完成租约 |
@@ -181,7 +195,8 @@ curl -sS -X PATCH http://127.0.0.1:8090/v1/plans/<plan_id>/assessments \
 
 ## 状态及失败行为
 
-- 计划按 `draft -> active -> completed` 单向迁移，激活和完成需要匹配版本。
+- 计划按 `draft -> active -> completed` 单向迁移，`active` 也可经中止进入终态 `aborted`；激活和完成需要匹配版本。
+- 中止把计划全部 `claimed` 租约转为 `revoked` 并释放节点，已上报探针与判定保留；重复中止返回同一条中止事实。
 - 区域版本只在计划草稿状态可追加，序列号严格递增且内容不可变。
 - A、AAAA、CNAME 条目在写入前规范化并稳定排序，重复条目直接拒绝。
 - 节点按 `ready -> leased -> ready` 变化，隔离节点不会被选中。
@@ -216,6 +231,7 @@ go run ./cmd/workflowprobe plan-revision-lifecycle
 go run ./cmd/workflowprobe node-lease-allocation
 go run ./cmd/workflowprobe probe-ingestion
 go run ./cmd/workflowprobe consistency-assessment
+go run ./cmd/workflowprobe plan-abort
 ```
 
 探针不访问外部网络，也不依赖已有状态文件。

@@ -89,3 +89,9 @@ func submitProbe(
 	}, &result)
 	return result, err
 }
+
+func abortPlan(harness *harness, planID string, payload any) (domain.PlanAbort, error) {
+	var record domain.PlanAbort
+	err := harness.call(http.MethodPatch, "/v1/plans/"+planID+"/abort", payload, &record)
+	return record, err
+}

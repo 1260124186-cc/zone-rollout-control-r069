@@ -40,6 +40,19 @@ func CompletePlan(plan *RolloutPlan, now time.Time) error {
 	return nil
 }
 
+func AbortPlan(plan *RolloutPlan, now time.Time) error {
+	if plan.State != PlanActive {
+		return InvalidState("plan can be aborted only from active", map[string]any{
+			"plan_id": plan.ID,
+			"state":   plan.State,
+		})
+	}
+	plan.State = PlanAborted
+	plan.AbortedAt = timePointer(now.UTC())
+	plan.Version++
+	return nil
+}
+
 func LeaseFingerprint(planID string, input LeaseInput) string {
 	payload := fmt.Sprintf(
 		"%s|%s|%s|%d|%d",

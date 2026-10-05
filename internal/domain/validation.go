@@ -56,6 +56,13 @@ type AssessmentInput struct {
 	RequestKey string `json:"request_key"`
 }
 
+type AbortInput struct {
+	Reason          string `json:"reason"`
+	Initiator       string `json:"initiator,omitempty"`
+	RequestKey      string `json:"request_key,omitempty"`
+	ExpectedVersion uint64 `json:"expected_version,omitempty"`
+}
+
 func NormalizePlanInput(input PlanCreateInput) PlanCreateInput {
 	input.Zone = canonicalName(input.Zone)
 	return input
@@ -245,6 +252,35 @@ func ValidateAssessmentInput(input AssessmentInput) error {
 		return Validation("assessment input is invalid", map[string]any{
 			"request_key": err.Error(),
 		})
+	}
+	return nil
+}
+
+func NormalizeAbortInput(input AbortInput) AbortInput {
+	input.Reason = strings.TrimSpace(input.Reason)
+	input.Initiator = strings.TrimSpace(input.Initiator)
+	input.RequestKey = strings.TrimSpace(input.RequestKey)
+	return input
+}
+
+func ValidateAbortInput(input AbortInput) error {
+	input = NormalizeAbortInput(input)
+	details := make(map[string]any)
+	if count := utf8.RuneCountInString(input.Reason); count < 4 || count > 500 {
+		details["reason"] = "must contain between 4 and 500 characters"
+	}
+	if input.Initiator != "" {
+		if count := utf8.RuneCountInString(input.Initiator); count > 120 {
+			details["initiator"] = "must be at most 120 characters"
+		}
+	}
+	if input.RequestKey != "" {
+		if err := validateRequestKey(input.RequestKey); err != nil {
+			details["request_key"] = err.Error()
+		}
+	}
+	if len(details) > 0 {
+		return Validation("abort input is invalid", details)
 	}
 	return nil
 }

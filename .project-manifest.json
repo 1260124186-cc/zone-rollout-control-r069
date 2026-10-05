@@ -154,6 +154,28 @@
         "domain",
         "storage"
       ]
+    },
+    {
+      "id": "plan-abort",
+      "name": "Plan abort and lease withdrawal",
+      "entry": "PATCH /v1/plans/{id}/abort",
+      "steps": [
+        "validate the abort reason, initiator, and optional version",
+        "transition the active plan to the terminal aborted state in one transaction",
+        "revoke every claimed lease of the plan and return its node to ready",
+        "record the immutable abort fact with revoked leases and preserved probes",
+        "replay the same abort fact for repeated and concurrent aborts"
+      ],
+      "success": "the plan becomes aborted, unfinished leases are revoked, stored probes and assessments stay readable, and repeated aborts return the identical record",
+      "failure": "missing plans, non-active states, stale versions, and invalid reasons return stable errors without state changes",
+      "verification": "workflowprobe plan-abort aborts an active plan, checks lease revocation and terminal rejections, replays the abort, and races aborts against allocations and probe submissions",
+      "module_ids": [
+        "httpapi",
+        "plan",
+        "allocation",
+        "domain",
+        "storage"
+      ]
     }
   ]
 }
