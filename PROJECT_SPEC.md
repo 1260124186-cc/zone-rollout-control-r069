@@ -20,14 +20,15 @@ Zone Rollout Control 是面向 DNS 运维人员的 Go HTTP 控制面。它把区
 
 - `id`：服务生成的稳定标识。
 - `zone`：区域名称，必须是小写 DNS 名称。
-- `state`：`draft`、`active` 或 `completed`。
+- `state`：`draft`、`active`、`completed` 或 `aborted`。
 - `minimum_success_ratio`：成功节点占比下限，范围为 0 到 1。
 - `maximum_latency_ms`：允许的最大探针延迟。
 - `expected_nodes`：计划预期参与的节点数，范围为 1 到 500。
 - `version`：每次计划聚合变化后递增。
 - `latest_revision_id`：最近一次添加的区域版本。
 - `latest_assessment_id`：最近一次完成的一致性判定。
-- `created_at`、`activated_at`、`completed_at`：RFC3339 时间。
+- `abort_id`：中止事实标识，仅在计划中止后出现。
+- `created_at`、`activated_at`、`completed_at`、`aborted_at`：RFC3339 时间。
 
 ### ZoneRevision
 
@@ -53,9 +54,11 @@ Zone Rollout Control 是面向 DNS 运维人员的 Go HTTP 控制面。它把区
 计划对某个解析节点的有期限占用。
 
 - `id`、`plan_id`、`node_id`、`allocation_id`。
-- `state`：`claimed`、`reported`、`released` 或 `expired`。
+- `state`：`claimed`、`reported`、`released`、`expired` 或 `revoked`。
 - `claimed_at`、`expires_at`、`finished_at`。
 - `probe_id`：成功登记探针后的结果标识。
+
+`revoked` 是计划中止对未完成租约的终态：它不删除租约，只把租约从节点占用中摘除。
 
 ### LeaseGroup
 
@@ -82,31 +85,51 @@ Zone Rollout Control 是面向 DNS 运维人员的 Go HTTP 控制面。它把区
 - `probe_count`、`success_count`、`success_ratio`、`maximum_latency_ms`。
 - `created_at`。
 
+### PlanAbort
+
+一次计划中止的不可变发起事实。
+
+- `id`、`plan_id`：中止事实由服务生成，同一计划的重复中止永远返回同一事实。
+- `reason`：中止原因，必填，最多 500 个字符。
+- `requested_by`：发起人，可选。
+- `revoked_lease_ids`、`revoked_lease_count`：中止时被撤销的未完成租约。
+- `preserved_probe_ids`、`preserved_probes`、`preserved_assessment_count`：被保留的已有探针与判定，探针与判定不会被删除。
+- `aborted_at`。
+
 ## 4. 状态和规则
 
 ### 滚动计划状态
 
 ```text
 draft --activate--> active --complete--> completed
+                        |
+                        +--abort--> aborted
 ```
 
 - 只有 `draft` 可以激活。
 - 只有 `active` 可以完成。
+- 只有 `active` 可以中止；`completed` 与 `aborted` 都是终态，不能互相迁移。
 - 激活后不能继续添加区域版本。
 - 激活和完成需要匹配当前版本。
+- 中止不使用版本号：并发或重试中止都竞争出同一个 `PlanAbort` 事实，重复中止返回该事实（HTTP 200），即使重试载荷的原因不同。
+- 完成与中止在同一存储事务上串行，版本匹配的完成最多成功一次，因此二者不可能同时成功。
+- 中止在单个事务内完成：计划进入 `aborted`、写入中止事实、把全部未完成的 `claimed` 租约改为 `revoked` 并释放节点；已上报租约（`reported`）、已有探针和已有判定全部保留。
+- 中止后不再接受新租约分配、新探针和新判定；原租约分配请求键的同载荷重放仍返回原分配组。
 
 ### 节点与租约生命周期
 
 ```text
 ready --lease--> leased --report--> ready
                    |
-                   +--release/expire--> ready
+                   +--release/expire/revoke--> ready
 ```
 
 - 隔离节点不能被分配。
 - 一个节点同一时刻最多有一个 `claimed` 租约。
 - 租约到期后不能提交探针。
 - 首次有效探针完成后，租约转为 `reported`，节点恢复 `ready`。
+- 计划中止撤销租约时，租约转为 `revoked` 且节点恢复 `ready`；`revoked` 是终态，不能再释放、过期或接收探针。
+- 探针提交与计划中止在同一互斥锁上竞争：要么探针先落库（租约 `reported`，中止随后保留它），要么中止先生效（租约 `revoked`，探针被拒绝），结果唯一。
 
 ### 区域版本规则
 
@@ -212,6 +235,25 @@ ready --lease--> leased --report--> ready
 
 失败行为：缺少区域版本、没有探针、请求键冲突或保存失败不会更新计划摘要。
 
+### W5 计划中止
+
+入口：
+
+- `PATCH /v1/plans/{id}/abort`
+- `GET /v1/plans/{id}/abort`
+
+步骤：
+
+1. HTTP 层严格解码 JSON，中止原因必填且长度受限。
+2. 计划服务在单个存储事务内加载计划；已经中止时直接返回原事实。
+3. 遍历计划下全部 `claimed` 租约，置为 `revoked`、写入完成时间并把占用节点恢复为 `ready`。
+4. 汇总保留的探针和判定，写入不可变 `PlanAbort` 事实与审计事件。
+5. 把计划原子迁移为 `aborted` 并提升版本。
+
+成功行为：计划进入不可继续的终态，未完成租约被统一撤销，已有探针与判定原样保留；重复中止（含不同原因、不同请求方）返回同一事实。
+
+失败行为：计划不是 `active`、原因为空或持久化失败时不修改任何状态。并发完成、并发分配和并发探针提交都在同一事务锁上与中止竞争，节点、租约、计划与聚合读取保持一致。
+
 ## 6. 模块边界
 
 | 模块 | 路径 | 责任 |
@@ -255,7 +297,10 @@ ready --lease--> leased --report--> ready
 - `PATCH /v1/plans/{id}/revisions`
 - `PATCH /v1/plans/{id}/activate`
 - `PATCH /v1/plans/{id}/complete`
+- `PATCH /v1/plans/{id}/abort`
+- `GET /v1/plans/{id}/abort`
 - `PATCH /v1/plans/{id}/leases`
+- `GET /v1/leases/{id}`
 - `PATCH /v1/leases/{id}/release`
 - `PATCH /v1/leases/{id}/probes`
 - `PATCH /v1/plans/{id}/assessments`
@@ -282,5 +327,6 @@ ready --lease--> leased --report--> ready
 2. 节点分配、租约唯一性、幂等重放和无可用节点冲突。
 3. 探针首写、同键重放、同键异载荷冲突和释放冲突。
 4. 一致性通过、审核触发、最新结果查询和幂等重放。
+5. 计划中止：未完成租约撤销、探针与判定保留、重复中止同一事实、与完成/分配/探针提交的并发竞争。
 
 每条探针使用独立临时目录，不访问外部网络，结束后关闭服务。

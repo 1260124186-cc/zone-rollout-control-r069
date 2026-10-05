@@ -34,7 +34,9 @@ func (s *Service) Evaluate(
 		if !ok {
 			return domain.NotFound("plan", planID)
 		}
-		if plan.State == domain.PlanDraft {
+		// Only an in-flight or finished plan can be assessed. An aborted plan
+		// is terminal; already stored assessments remain readable via Latest.
+		if plan.State != domain.PlanActive && plan.State != domain.PlanCompleted {
 			return domain.InvalidState("plan must be active or completed for assessment", map[string]any{
 				"plan_id": planID,
 				"state":   plan.State,

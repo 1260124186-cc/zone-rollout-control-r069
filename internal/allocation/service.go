@@ -40,12 +40,9 @@ func (s *Service) Allocate(
 		if !ok {
 			return domain.NotFound("plan", planID)
 		}
-		if plan.State != domain.PlanActive {
-			return domain.InvalidState("plan must be active for node leasing", map[string]any{
-				"plan_id": planID,
-				"state":   plan.State,
-			})
-		}
+		// An idempotent replay resolves before the state guard: replaying the
+		// exact original request after the plan has been aborted must still
+		// return the (now revoked) lease group that was originally created.
 		if existingID, exists := state.LeaseRequestKeys[requestIndex]; exists {
 			existing, found := state.LeaseGroups[existingID]
 			if !found {
@@ -60,6 +57,12 @@ func (s *Service) Allocate(
 			}
 			group = existing
 			return nil
+		}
+		if plan.State != domain.PlanActive {
+			return domain.InvalidState("plan must be active for node leasing", map[string]any{
+				"plan_id": planID,
+				"state":   plan.State,
+			})
 		}
 
 		expireLeases(state, now)
@@ -137,7 +140,7 @@ func (s *Service) Release(ctx context.Context, leaseID string) (domain.NodeLease
 		if !ok {
 			return domain.NotFound("lease", leaseID)
 		}
-		if lease.State == domain.LeaseReleased || lease.State == domain.LeaseExpired {
+		if lease.State == domain.LeaseReleased || lease.State == domain.LeaseExpired || lease.State == domain.LeaseRevoked {
 			result = lease
 			return nil
 		}
@@ -178,6 +181,19 @@ func (s *Service) ExpireDue(ctx context.Context) (int, error) {
 		return nil
 	})
 	return expired, err
+}
+
+func (s *Service) Get(ctx context.Context, leaseID string) (domain.NodeLease, error) {
+	var lease domain.NodeLease
+	err := s.store.Read(ctx, func(state *domain.State) error {
+		found, ok := state.Leases[leaseID]
+		if !ok {
+			return domain.NotFound("lease", leaseID)
+		}
+		lease = found
+		return nil
+	})
+	return lease, err
 }
 
 func expireLeases(state *domain.State, now time.Time) int {

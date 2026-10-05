@@ -8,6 +8,7 @@ const (
 	PlanDraft     PlanState = "draft"
 	PlanActive    PlanState = "active"
 	PlanCompleted PlanState = "completed"
+	PlanAborted   PlanState = "aborted"
 )
 
 type NodeState string
@@ -25,6 +26,7 @@ const (
 	LeaseReported LeaseState = "reported"
 	LeaseReleased LeaseState = "released"
 	LeaseExpired  LeaseState = "expired"
+	LeaseRevoked  LeaseState = "revoked"
 )
 
 type Verdict string
@@ -68,9 +70,11 @@ type RolloutPlan struct {
 	Version             uint64     `json:"version"`
 	LatestRevisionID    string     `json:"latest_revision_id,omitempty"`
 	LatestAssessmentID  string     `json:"latest_assessment_id,omitempty"`
+	AbortID             string     `json:"abort_id,omitempty"`
 	CreatedAt           time.Time  `json:"created_at"`
 	ActivatedAt         *time.Time `json:"activated_at,omitempty"`
 	CompletedAt         *time.Time `json:"completed_at,omitempty"`
+	AbortedAt           *time.Time `json:"aborted_at,omitempty"`
 }
 
 type ResolverNode struct {
@@ -133,6 +137,19 @@ type RolloutAssessment struct {
 	CreatedAt        time.Time `json:"created_at"`
 }
 
+type PlanAbort struct {
+	ID                       string    `json:"id"`
+	PlanID                   string    `json:"plan_id"`
+	Reason                   string    `json:"reason"`
+	RequestedBy              string    `json:"requested_by,omitempty"`
+	RevokedLeaseIDs          []string  `json:"revoked_lease_ids"`
+	RevokedLeaseCount        int       `json:"revoked_lease_count"`
+	PreservedProbeIDs        []string  `json:"preserved_probe_ids"`
+	PreservedProbes          int       `json:"preserved_probes"`
+	PreservedAssessmentCount int       `json:"preserved_assessments"`
+	AbortedAt                time.Time `json:"aborted_at"`
+}
+
 type AuditEvent struct {
 	ID         string         `json:"id"`
 	EntityType string         `json:"entity_type"`
@@ -152,6 +169,7 @@ type State struct {
 	LeaseGroups           map[string]LeaseGroup        `json:"lease_groups"`
 	Probes                map[string]Probe             `json:"probes"`
 	Assessments           map[string]RolloutAssessment `json:"assessments"`
+	Aborts                map[string]PlanAbort         `json:"aborts"`
 	LeaseRequestKeys      map[string]string            `json:"lease_request_keys"`
 	AssessmentRequestKeys map[string]string            `json:"assessment_request_keys"`
 	AuditEvents           []AuditEvent                 `json:"audit_events"`

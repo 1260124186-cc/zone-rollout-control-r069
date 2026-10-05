@@ -56,6 +56,16 @@ type AssessmentInput struct {
 	RequestKey string `json:"request_key"`
 }
 
+type PlanAbortInput struct {
+	Reason      string `json:"reason"`
+	RequestedBy string `json:"requested_by"`
+}
+
+const (
+	MaxAbortReasonRunes    = 500
+	MaxAbortRequesterRunes = 180
+)
+
 func NormalizePlanInput(input PlanCreateInput) PlanCreateInput {
 	input.Zone = canonicalName(input.Zone)
 	return input
@@ -245,6 +255,29 @@ func ValidateAssessmentInput(input AssessmentInput) error {
 		return Validation("assessment input is invalid", map[string]any{
 			"request_key": err.Error(),
 		})
+	}
+	return nil
+}
+
+func NormalizePlanAbortInput(input PlanAbortInput) PlanAbortInput {
+	input.Reason = strings.TrimSpace(input.Reason)
+	input.RequestedBy = strings.TrimSpace(input.RequestedBy)
+	return input
+}
+
+func ValidatePlanAbortInput(input PlanAbortInput) error {
+	input = NormalizePlanAbortInput(input)
+	details := make(map[string]any)
+	if count := utf8.RuneCountInString(input.Reason); count < 1 || count > MaxAbortReasonRunes {
+		details["reason"] = "must contain between 1 and 500 characters"
+	}
+	if input.RequestedBy != "" {
+		if count := utf8.RuneCountInString(input.RequestedBy); count > MaxAbortRequesterRunes {
+			details["requested_by"] = "must be at most 180 characters"
+		}
+	}
+	if len(details) > 0 {
+		return Validation("plan abort input is invalid", details)
 	}
 	return nil
 }

@@ -20,6 +20,8 @@ func Run(args []string, output io.Writer) error {
 		run = runProbeIngestion
 	case "consistency-assessment":
 		run = runConsistencyAssessment
+	case "plan-abort":
+		run = runPlanAbort
 	default:
 		return fmt.Errorf("unsupported workflow %q", args[0])
 	}
@@ -59,4 +61,10 @@ func ensure(condition bool, message string) error {
 		return nil
 	}
 	return errors.New(message)
+}
+
+// mustFail performs a call through the harness and asserts the HTTP failure
+// contract in one step.
+func mustFail(harness *harness, method string, path string, body any, status int, code string) error {
+	return expectFailure(harness.call(method, path, body, nil), status, code)
 }

@@ -167,6 +167,126 @@ func (s *Service) Complete(
 	return plan, err
 }
 
+// Abort moves an active plan into the terminal aborted state, records the
+// reason and the initiating fact, revokes every outstanding claimed lease and
+// frees its node. Existing probes and assessments are preserved untouched.
+// Repeating an abort returns the same fact that was stored on the first call,
+// so concurrent or retried calls converge on a single result.
+func (s *Service) Abort(
+	ctx context.Context,
+	planID string,
+	input domain.PlanAbortInput,
+) (domain.PlanAbort, error) {
+	if err := domain.ValidatePlanAbortInput(input); err != nil {
+		return domain.PlanAbort{}, err
+	}
+	input = domain.NormalizePlanAbortInput(input)
+	now := s.clock.Now().UTC()
+	var fact domain.PlanAbort
+	err := s.store.Write(ctx, func(state *domain.State) error {
+		current, ok := state.Plans[planID]
+		if !ok {
+			return domain.NotFound("plan", planID)
+		}
+		if current.State == domain.PlanAborted {
+			existing, found := state.Aborts[current.AbortID]
+			if !found {
+				return domain.NewError(domain.CodeStorageFailure, "plan references a missing abort fact", map[string]any{
+					"abort_id": current.AbortID,
+				})
+			}
+			fact = existing
+			return nil
+		}
+
+		abortID := s.ids.New("abr")
+		revokedLeaseIDs := make([]string, 0)
+		for leaseID, lease := range state.Leases {
+			if lease.PlanID != planID || lease.State != domain.LeaseClaimed {
+				continue
+			}
+			finishedAt := now
+			lease.State = domain.LeaseRevoked
+			lease.FinishedAt = &finishedAt
+			state.Leases[leaseID] = lease
+			if node, ok := state.Nodes[lease.NodeID]; ok && node.State == domain.NodeLeased {
+				node.State = domain.NodeReady
+				node.Version++
+				node.UpdatedAt = now
+				state.Nodes[node.ID] = node
+			}
+			revokedLeaseIDs = append(revokedLeaseIDs, leaseID)
+			store.AddAudit(state, s.ids, "lease", leaseID, "revoked", now, map[string]any{
+				"plan_id":  planID,
+				"abort_id": abortID,
+			})
+		}
+		sort.Strings(revokedLeaseIDs)
+
+		preservedProbeIDs := make([]string, 0)
+		assessmentCount := 0
+		for probeID, probe := range state.Probes {
+			if probe.PlanID == planID {
+				preservedProbeIDs = append(preservedProbeIDs, probeID)
+			}
+		}
+		sort.Strings(preservedProbeIDs)
+		for _, assessment := range state.Assessments {
+			if assessment.PlanID == planID {
+				assessmentCount++
+			}
+		}
+
+		fact = domain.PlanAbort{
+			ID:                       abortID,
+			PlanID:                   planID,
+			Reason:                   input.Reason,
+			RequestedBy:              input.RequestedBy,
+			RevokedLeaseIDs:          revokedLeaseIDs,
+			RevokedLeaseCount:        len(revokedLeaseIDs),
+			PreservedProbeIDs:        preservedProbeIDs,
+			PreservedProbes:          len(preservedProbeIDs),
+			PreservedAssessmentCount: assessmentCount,
+			AbortedAt:                now,
+		}
+		state.Aborts[fact.ID] = fact
+		if err := domain.AbortPlan(&current, fact.ID, now); err != nil {
+			return err
+		}
+		state.Plans[planID] = current
+		store.AddAudit(state, s.ids, "plan", planID, "aborted", now, map[string]any{
+			"abort_id":         fact.ID,
+			"revoked_leases":   fact.RevokedLeaseCount,
+			"preserved_probes": fact.PreservedProbes,
+			"requested_by":     fact.RequestedBy,
+		})
+		return nil
+	})
+	return fact, err
+}
+
+func (s *Service) GetAbort(ctx context.Context, planID string) (domain.PlanAbort, error) {
+	var fact domain.PlanAbort
+	err := s.store.Read(ctx, func(state *domain.State) error {
+		plan, ok := state.Plans[planID]
+		if !ok {
+			return domain.NotFound("plan", planID)
+		}
+		if plan.AbortID == "" {
+			return domain.NotFound("abort", planID)
+		}
+		found, ok := state.Aborts[plan.AbortID]
+		if !ok {
+			return domain.NewError(domain.CodeStorageFailure, "plan references a missing abort fact", map[string]any{
+				"abort_id": plan.AbortID,
+			})
+		}
+		fact = found
+		return nil
+	})
+	return fact, err
+}
+
 func (s *Service) Get(ctx context.Context, planID string) (domain.RolloutPlan, error) {
 	var plan domain.RolloutPlan
 	err := s.store.Read(ctx, func(state *domain.State) error {

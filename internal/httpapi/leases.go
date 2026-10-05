@@ -28,3 +28,12 @@ func (s *Server) releaseLease(w http.ResponseWriter, r *http.Request) {
 	}
 	sendData(w, r, http.StatusOK, lease)
 }
+
+func (s *Server) getLease(w http.ResponseWriter, r *http.Request) {
+	lease, err := s.allocations.Get(r.Context(), r.PathValue("id"))
+	if err != nil {
+		sendError(w, r, err)
+		return
+	}
+	sendData(w, r, http.StatusOK, lease)
+}

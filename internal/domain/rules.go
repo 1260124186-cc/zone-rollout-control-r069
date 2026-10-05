@@ -40,6 +40,24 @@ func CompletePlan(plan *RolloutPlan, now time.Time) error {
 	return nil
 }
 
+// AbortPlan performs the only allowed transition into the terminal aborted
+// state. Draft, completed and already aborted plans are rejected so that
+// completion and abort can never both succeed on the same plan.
+func AbortPlan(plan *RolloutPlan, abortID string, now time.Time) error {
+	if plan.State != PlanActive {
+		return InvalidState("plan can be aborted only while active", map[string]any{
+			"plan_id": plan.ID,
+			"state":   plan.State,
+		})
+	}
+	abortedAt := now.UTC()
+	plan.State = PlanAborted
+	plan.AbortID = abortID
+	plan.AbortedAt = &abortedAt
+	plan.Version++
+	return nil
+}
+
 func LeaseFingerprint(planID string, input LeaseInput) string {
 	payload := fmt.Sprintf(
 		"%s|%s|%s|%d|%d",
